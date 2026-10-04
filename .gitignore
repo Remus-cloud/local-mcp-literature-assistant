@@ -1,0 +1,8 @@
+.env
+__pycache__/
+.ipynb_checkpoints/
+.pytest_cache/
+*.egg-info/
+data/papers/
+*.pyc
+notebooks/

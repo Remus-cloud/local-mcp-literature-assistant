@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "literature-bot"
+version = "0.2.0"
+description = "A local literature search and evidence-grounded Q&A assistant with MCP support."
+requires-python = ">=3.11"
+dependencies = [
+    "arxiv>=4,<5",
+    "mcp>=2.2,<2.3",
+    "openai>=3,<4",
+    "PyMuPDF>=1.28,<2",
+    "python-dotenv>=1,<2",
+    "streamlit>=1.55,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=9,<10"]
+
+[project.scripts]
+literature-bot-mcp = "literature_bot.mcp_integration.server:main"
+literature-bot-chat = "literature_bot.mcp_chatbot:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
