@@ -19,11 +19,16 @@
 
 ### 1. 获取项目
 
-在 GitHub 仓库页面选择 **Code → Download ZIP**，解压后，将整个项目文件夹放到 `F:\literature-bot`。
+在 Anaconda Prompt 中，进入你希望存放项目的位置，然后执行：
 
-确认该目录下直接包含 `pyproject.toml` 和 `src`，而不是又嵌套了一层项目文件夹。也可以使用 Git 克隆仓库；后续命令均需在项目根目录运行。
+```bat
+git clone https://github.com/Remus-cloud/local-mcp-literature-assistant.git
+cd local-mcp-literature-assistant
+```
 
-如果保存到其他位置，请将下面的 `F:\literature-bot` 替换为实际路径。
+后续安装、配置和启动命令，都在这个项目根目录执行。
+
+如果没有安装 Git，也可以在仓库页面选择 **Code → Download ZIP**，解压后在 Anaconda Prompt 中进入解压后的项目目录。
 
 ### 2. 创建环境并安装项目
 
