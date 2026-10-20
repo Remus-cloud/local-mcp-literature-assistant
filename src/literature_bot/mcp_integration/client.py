@@ -24,7 +24,7 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def default_server_parameters() -> StdioServerParameters:
+def default_server_parameters(*, paper_retriever: str | None = None) -> StdioServerParameters:
     """Describe how to launch the local server using this Python environment."""
 
     project_root = _project_root()
@@ -34,11 +34,22 @@ def default_server_parameters() -> StdioServerParameters:
     if existing_pythonpath:
         pythonpath_parts.append(existing_pythonpath)
 
+    # MCP's child environment may not inherit arbitrary parent variables.
+    # Forward only documented, non-secret retrieval configuration, never API keys.
+    env = {"PYTHONPATH": os.pathsep.join(pythonpath_parts)}
+    for name in ("LITERATURE_BOT_PAPER_RETRIEVER", "LITERATURE_BOT_SPECTER2_CANDIDATE_POOL",
+                 "LITERATURE_BOT_PAPERS_DIR"):
+        if os.getenv(name):
+            env[name] = os.environ[name]
+    if paper_retriever is not None:
+        if paper_retriever not in {"arxiv", "specter2"}:
+            raise ValueError("paper_retriever must be arxiv or specter2")
+        env["LITERATURE_BOT_PAPER_RETRIEVER"] = paper_retriever
     return StdioServerParameters(
         command=sys.executable,
         args=["-m", "literature_bot.mcp_integration.server"],
         cwd=project_root,
-        env={"PYTHONPATH": os.pathsep.join(pythonpath_parts)},
+        env=env,
     )
 
 

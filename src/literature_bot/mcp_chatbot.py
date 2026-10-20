@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import dataclass, field
 from functools import partial
 import json
+import os
 from pathlib import Path
 import sys
 from types import TracebackType
@@ -16,6 +17,8 @@ from openai import OpenAI
 from .config import Settings, load_settings
 from .llm_service import create_llm_client
 from .mcp_integration.client import LiteratureMCPClient
+from .evidence_binding import BINDING_PROMPT, EvidenceRegistry
+from .provider import request_options
 
 
 DEFAULT_SYSTEM_PROMPT = """
@@ -51,6 +54,9 @@ class ChatbotResult:
     model_rounds: int
     evidence_sources: list[dict[str, Any]] = field(default_factory=list)
     citation_pages: list[dict[str, Any]] = field(default_factory=list)
+    verification: dict[str, Any] = field(default_factory=dict)
+    binding: dict[str, Any] = field(default_factory=dict)
+    search_runs: list[dict[str, Any]] = field(default_factory=list)
 
 
 class QwenMCPChatbot:
@@ -70,6 +76,11 @@ class QwenMCPChatbot:
         mcp_client: LiteratureMCPClient | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_tool_rounds: int = 8,
+        verifier: Any = None,
+        verification_mode: str | None = None,
+        binding_mode: str | None = None,
+        numeric_mode: str | None = None,
+        diagnostics_mode: str | None = None,
     ) -> None:
         if max_tool_rounds < 1:
             raise ValueError("max_tool_rounds must be at least 1")
@@ -80,6 +91,27 @@ class QwenMCPChatbot:
         self.system_prompt = system_prompt.strip()
         self.max_tool_rounds = max_tool_rounds
         self._tools: list[dict[str, Any]] | None = None
+        self.binding_mode = binding_mode or os.getenv("LITERATURE_BOT_BINDING", "off")
+        if self.binding_mode not in {"off", "structured"}:
+            raise ValueError("LITERATURE_BOT_BINDING must be off or structured")
+        self.binding_format = os.getenv("LITERATURE_BOT_BINDING_FORMAT", "json_object")
+        if self.binding_format not in {"json_object", "prompt_only"}:
+            raise ValueError("LITERATURE_BOT_BINDING_FORMAT must be json_object or prompt_only")
+        self.numeric_mode = numeric_mode if numeric_mode is not None else os.getenv("LITERATURE_BOT_NUMERIC_VERIFICATION", "off")
+        if self.numeric_mode not in {"off", "shadow"}:
+            raise ValueError("LITERATURE_BOT_NUMERIC_VERIFICATION must be off or shadow")
+        self.diagnostics_mode = diagnostics_mode if diagnostics_mode is not None else os.getenv("LITERATURE_BOT_DIAGNOSTICS", "off")
+        if self.diagnostics_mode not in {"off", "shadow"}:
+            raise ValueError("LITERATURE_BOT_DIAGNOSTICS must be off or shadow")
+        mode = verification_mode or os.getenv("LITERATURE_BOT_VERIFICATION", "off")
+        if mode not in {"off", "shadow"}:
+            raise ValueError("LITERATURE_BOT_VERIFICATION must be off or shadow")
+        self.verifier = verifier
+        if self.verifier is None and mode == "shadow":
+            from .verification import AnswerVerifier
+            from .verification.claims import QwenClaimExtractor
+
+            self.verifier = AnswerVerifier(QwenClaimExtractor(llm_client, model))
 
     @classmethod
     def from_settings(
@@ -193,6 +225,12 @@ class QwenMCPChatbot:
         }
         executions: list[ToolExecution] = []
         evidence_sources: list[dict[str, Any]] = []
+        search_runs: list[dict[str, Any]] = []
+        registry = EvidenceRegistry()
+        if self.binding_mode == "structured":
+            # Keep ordinary search-only requests and MCP protocol unchanged.
+            messages = [dict(m) for m in messages]
+            messages[0]["content"] += "\n\n" + BINDING_PROMPT
 
         for round_number in range(1, self.max_tool_rounds + 1):
             response = await anyio.to_thread.run_sync(
@@ -202,8 +240,11 @@ class QwenMCPChatbot:
                     messages=messages,
                     tools=self._tools,
                     tool_choice="auto",
-                    max_tokens=2_000,
-                    extra_body={"enable_thinking": False},
+                    max_tokens=3_500 if self.binding_mode == "structured" and registry.entries else 2_000,
+                    **request_options(self.llm_client),
+                    **({"response_format": {"type": "json_object"}}
+                       if self.binding_mode == "structured" and registry.entries
+                       and self.binding_format == "json_object" else {}),
                 )
             )
             assistant_message = response.choices[0].message
@@ -213,11 +254,63 @@ class QwenMCPChatbot:
                 answer = (assistant_message.content or "").strip()
                 if not answer:
                     raise RuntimeError("Qwen returned neither text nor tool calls.")
+                binding = {"status": "disabled" if self.binding_mode == "off" else "no_body_evidence"}
+                if self.binding_mode == "structured" and registry.entries:
+                    try:
+                        if getattr(response.choices[0], "finish_reason", None) == "length":
+                            raise ValueError("truncated_binding_response")
+                        answer, binding = registry.render(answer)
+                    except (ValueError, TypeError) as error:
+                        binding = {
+                            "status": "invalid_schema", "error_type": type(error).__name__,
+                            "raw_response": answer, "claims": [],
+                        }
+                        answer = "【本次结构化证据绑定失败，以下为未验证的原始输出】\n\n" + answer
+                verification = {"mode": "off", "status": "disabled"}
+                if self.verifier is not None:
+                    try:
+                        if binding["status"] == "invalid_schema":
+                            verification = {"mode": "shadow", "status": "skipped_binding_failure"}
+                        elif binding["status"] == "structured":
+                            verification = await anyio.to_thread.run_sync(
+                                partial(self.verifier.verify_bound, answer, evidence_sources, binding)
+                            )
+                        else:
+                            verification = await anyio.to_thread.run_sync(
+                                partial(self.verifier.verify, answer, evidence_sources)
+                            )
+                    except Exception as error:
+                        # Diagnostics must never discard a successfully generated
+                        # answer or expose raw provider exception text/secrets.
+                        verification = {
+                            "mode": "shadow", "status": "verification_error",
+                            "error_type": type(error).__name__, "answer_modified": False,
+                        }
+                if self.numeric_mode == "shadow":
+                    from .verification.numeric import audit_numeric
+                    # Independent of MiniCheck and its failure/latency. No model
+                    # request, no answer rewriting, no change to semantic scores.
+                    question = "\n".join(str(m.get("content", "")) for m in messages
+                                         if m.get("role") == "user")
+                    verification["numeric"] = audit_numeric(
+                        answer, evidence_sources, binding, question,
+                    )
+                if self.diagnostics_mode == "shadow":
+                    from .verification.diagnostics import build_diagnostics
+                    # Post-generation only: never feed these candidate labels
+                    # back into the model or overwrite any upstream diagnostic.
+                    verification["unified"] = build_diagnostics(
+                        answer, evidence_sources, binding, verification,
+                        numeric_report=verification.get("numeric", {"status": "disabled"}),
+                    )
                 return ChatbotResult(
                     answer=answer,
                     tool_executions=executions,
                     model_rounds=round_number,
                     evidence_sources=evidence_sources,
+                    verification=verification,
+                    binding=binding,
+                    search_runs=search_runs,
                 )
 
             messages.append(
@@ -260,9 +353,21 @@ class QwenMCPChatbot:
                     )
                     tool_result = self._serialize_mcp_result(mcp_result)
                     succeeded = not bool(mcp_result.is_error)
+                    if succeeded and tool_name == "literature_search_papers":
+                        data = tool_result.get("data")
+                        if isinstance(data, dict):
+                            search_runs.append({
+                                key: data.get(key) for key in
+                                ("query", "count", "candidate_count", "retrieval_mode", "reranking_applied")
+                            })
                     if succeeded and tool_name == "literature_retrieve_paper_evidence":
                         data = tool_result.get("data")
                         if isinstance(data, dict):
+                            if self.binding_mode == "structured":
+                                data = registry.register(data)
+                                tool_result["data"] = data
+                                # Do not send a second unannotated duplicate to the model.
+                                tool_result["messages"] = []
                             evidence_sources.append(data)
 
                 executions.append(

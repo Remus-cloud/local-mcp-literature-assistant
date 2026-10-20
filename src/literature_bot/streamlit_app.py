@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import Any
 
 import streamlit as st
+from openai import APIError
 
 from literature_bot.config import load_settings
 from literature_bot.citations import cited_sources
 from literature_bot.mcp_chatbot import ChatbotResult, QwenMCPChatbot
+from literature_bot.mcp_integration.client import LiteratureMCPClient, default_server_parameters
+from literature_bot.diagnostic_ui import render_diagnostics
 
 
 WELCOME_TEXT = """
@@ -33,6 +36,8 @@ class Submission:
     question: str | None = None
     prompt_name: str | None = None
     prompt_arguments: dict[str, str] = field(default_factory=dict)
+    scientific_trial: bool | None = None
+    paper_retriever: str | None = None
 
 
 def _project_root() -> Path:
@@ -41,7 +46,18 @@ def _project_root() -> Path:
 
 async def _answer_submission(submission: Submission) -> ChatbotResult:
     settings = load_settings(_project_root() / ".env")
-    chatbot = QwenMCPChatbot.from_settings(settings)
+    options = {}
+    if submission.scientific_trial is not None:
+        if type(submission.scientific_trial) is not bool:
+            raise ValueError("scientific_trial must be boolean")
+        mode = "shadow" if submission.scientific_trial else "off"
+        options = dict(verification_mode=mode, numeric_mode=mode, diagnostics_mode=mode,
+                       binding_mode="structured")
+    chatbot = QwenMCPChatbot.from_settings(
+        settings, mcp_client=LiteratureMCPClient(
+            default_server_parameters(paper_retriever=submission.paper_retriever)),
+        **options,
+    )
 
     async with chatbot:
         if submission.prompt_name is not None:
@@ -80,6 +96,11 @@ def answer_submission(submission: Submission) -> ChatbotResult:
 def format_error(error: BaseException) -> str:
     """Expose actionable leaf errors instead of TaskGroup wrapper messages."""
 
+    if isinstance(error, APIError):
+        return (
+            f"模型接口请求失败（{type(error).__name__}）。"
+            "请检查网络、接口地址、模型权限和额度；敏感请求详情未展示。"
+        )
     if isinstance(error, BaseExceptionGroup):
         messages: list[str] = []
         for child in error.exceptions:
@@ -107,19 +128,19 @@ def _render_quick_actions() -> Submission | None:
 
     search_column.button(
         "🔎 搜索文献",
-        use_container_width=True,
+        width="stretch",
         on_click=_activate_prompt,
         args=("search_literature",),
     )
     analyze_column.button(
         "📄 分析论文",
-        use_container_width=True,
+        width="stretch",
         on_click=_activate_prompt,
         args=("analyze_paper",),
     )
     summarize_column.button(
         "📝 总结论文",
-        use_container_width=True,
+        width="stretch",
         on_click=_activate_prompt,
         args=("summarize_paper",),
     )
@@ -142,7 +163,7 @@ def _render_quick_actions() -> Submission | None:
             max_results = st.slider("返回论文数量", 1, 10, 5)
             submitted = st.form_submit_button(
                 "开始搜索",
-                use_container_width=True,
+                width="stretch",
             )
         if submitted:
             if not topic.strip():
@@ -170,7 +191,7 @@ def _render_quick_actions() -> Submission | None:
             )
             submitted = st.form_submit_button(
                 "分析论文",
-                use_container_width=True,
+                width="stretch",
             )
         if submitted:
             if not arxiv_id.strip() or not question.strip():
@@ -200,7 +221,7 @@ def _render_quick_actions() -> Submission | None:
             )
             submitted = st.form_submit_button(
                 "生成总结",
-                use_container_width=True,
+                width="stretch",
             )
         if submitted:
             if not arxiv_id.strip() or not focus.strip():
@@ -236,10 +257,11 @@ def _render_citations(pages: list[dict[str, Any]]) -> None:
                 st.text(page.get('text') or '该页没有可提取的文字。')
 
 
-def _render_message(message: dict[str, Any]) -> None:
+def _render_message(message: dict[str, Any], key: str = "message") -> None:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         _render_citations(message.get("citation_pages", []))
+        render_diagnostics(message, key)
         tool_names = message.get("tool_names", [])
         if tool_names:
             st.caption("调用 MCP Tools：" + " → ".join(tool_names))
@@ -273,8 +295,15 @@ def _append_result(submission: Submission) -> None:
                 "content": result.answer,
                 "tool_names": tool_names,
                 "citation_pages": result.citation_pages,
+                "verification": result.verification,
+                "evidence_sources": result.evidence_sources,
+                "search_runs": result.search_runs,
+                "question": submission.display_text,
+                "trial_settings": {"scientific_trial": submission.scientific_trial,
+                                   "paper_retriever": submission.paper_retriever},
             }
         )
+        render_diagnostics(st.session_state.messages[-1], f"message_{len(st.session_state.messages)-1}")
 
 
 def main() -> None:
@@ -289,19 +318,30 @@ def main() -> None:
     st.markdown(WELCOME_TEXT)
 
     with st.sidebar:
+        st.subheader("科学模块试用")
+        paper_retriever = st.selectbox(
+            "论文排序", ["specter2", "arxiv"],
+            format_func=lambda value: {"specter2": "SPECTER2 候选重排", "arxiv": "arXiv 原始排序"}[value],
+            key="paper_retriever",
+        )
+        scientific_trial = st.checkbox("运行 MiniCheck 与科学诊断", value=True, key="scientific_trial")
+        st.checkbox("显示实验性诊断提示", value=True, key="show_diagnostics")
+        st.caption("运行开关只影响之后的问题；显示开关只影响界面，不重新调用模型。"
+                   "MiniCheck 使用本地权重，翻译仍调用当前 API，可能计费并增加延迟。"
+                   "未进行独立人工验收；不会自动修正回答。")
         st.subheader("运行说明")
         st.markdown(
             "当前版本不保存长期对话记录。页面中的消息只用于本次浏览器会话显示。"
         )
-        if st.button("清空页面消息", use_container_width=True):
+        if st.button("清空页面消息", width="stretch"):
             st.session_state.messages = []
             st.rerun()
 
     quick_submission = _render_quick_actions()
     st.divider()
 
-    for message in st.session_state.messages:
-        _render_message(message)
+    for index, message in enumerate(st.session_state.messages):
+        _render_message(message, f"message_{index}")
 
     question = st.chat_input(
         "直接提问，例如：帮我搜索具身智能相关论文",
@@ -315,7 +355,8 @@ def main() -> None:
         )
 
     if submission is not None:
-        _append_result(submission)
+        _append_result(replace(submission, scientific_trial=scientific_trial,
+                               paper_retriever=paper_retriever))
 
 
 if __name__ == "__main__":

@@ -3,13 +3,15 @@
 from openai import OpenAI
 
 from .config import Settings
+from .provider import ProviderClient, request_options
 from .models import PaperMetadata, RetrievalHit
 
 
 def create_llm_client(settings: Settings) -> OpenAI:
     """Create a client for the configured OpenAI-compatible endpoint."""
 
-    return OpenAI(api_key=settings.api_key, base_url=settings.base_url)
+    return ProviderClient(api_key=settings.api_key, base_url=settings.base_url,
+                          request_extra_body=settings.request_extra_body)
 
 
 def create_retrieval_query(
@@ -40,7 +42,7 @@ def create_retrieval_query(
             {"role": "user", "content": question},
         ],
         max_tokens=150,
-        extra_body={"enable_thinking": False},
+        **request_options(client),
     )
     retrieval_query = (response.choices[0].message.content or "").strip()
 
@@ -112,7 +114,7 @@ arXiv ID：
             {"role": "user", "content": prompt},
         ],
         max_tokens=1500,
-        extra_body={"enable_thinking": False},
+        **request_options(client),
     )
     answer = (response.choices[0].message.content or "").strip()
 

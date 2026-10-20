@@ -8,6 +8,7 @@ from .service import LiteratureService
 from .prompts import register_prompts
 from .resources import register_resources
 from .tools import register_tools
+from ..version import __version__
 
 
 def create_server(
@@ -29,7 +30,7 @@ def create_server(
             "evidence retrieval. Base answers only on returned evidence and cite "
             "its page_number fields."
         ),
-        version="0.2.0",
+        version=__version__,
     )
     active_service = service or LiteratureService(papers_directory)
     register_tools(server, active_service)

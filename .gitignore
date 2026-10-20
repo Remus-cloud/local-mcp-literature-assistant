@@ -4,5 +4,31 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 data/papers/
+data/embeddings/
 *.pyc
 notebooks/
+evaluations/verification_runs/
+evaluations/binding_runs/
+evaluations/numeric_runs/
+evaluations/p2_runs/
+evaluations/trial_runs/
+evaluations/public_runs/
+evaluations/release_runs/
+evaluations/*_review.json
+evaluations/binding_review_decisions_v1.json
+.env.*
+!.env.example
+.venv/
+build/
+dist/
+
+# Public repository: end-user application only.
+# Keep development assets on this machine; do not delete local files.
+/tests/
+/.github/
+/evaluations/
+/scripts/*
+!/scripts/check_setup.py
+!/scripts/prepare_verification.py
+/docs/*
+!/docs/tested-windows-py312.txt

@@ -11,6 +11,7 @@ from ..arxiv_service import create_arxiv_client, search_arxiv
 from ..models import PaperMetadata, PaperPage, TextChunk
 from ..pdf_service import download_paper_pdf, extract_pdf_pages
 from ..retrieval import build_paper_chunks, retrieve_relevant_chunks
+from ..scientific_retrieval import Specter2PaperRetriever
 from .schemas import (
     ArxivIdInput,
     EvidenceItem,
@@ -50,27 +51,85 @@ class PreparedPaper:
 class LiteratureService:
     """Manage paper metadata plus process-local page and chunk caches."""
 
-    def __init__(self, papers_directory: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        papers_directory: str | Path | None = None,
+        *,
+        paper_retriever=None,
+    ) -> None:
         self.papers_directory = Path(
             papers_directory or default_papers_directory()
         ).resolve()
         self._arxiv_client = create_arxiv_client()
         self._papers: dict[str, PaperMetadata] = {}
         self._prepared: dict[str, PreparedPaper] = {}
+        self._paper_retriever = paper_retriever
+        self._paper_retriever_mode = os.getenv(
+            "LITERATURE_BOT_PAPER_RETRIEVER", "specter2"
+        ).strip().lower()
+        if self._paper_retriever_mode not in {"arxiv", "specter2"}:
+            raise ValueError(
+                "LITERATURE_BOT_PAPER_RETRIEVER must be 'arxiv' or 'specter2'"
+            )
+        self._specter2_candidate_pool = self._candidate_pool_size()
+
+    @staticmethod
+    def _candidate_pool_size() -> int:
+        raw = os.getenv("LITERATURE_BOT_SPECTER2_CANDIDATE_POOL", "10")
+        try:
+            value = int(raw)
+        except ValueError as error:
+            raise ValueError(
+                "LITERATURE_BOT_SPECTER2_CANDIDATE_POOL must be an integer"
+            ) from error
+        if not 1 <= value <= 10:
+            raise ValueError(
+                "LITERATURE_BOT_SPECTER2_CANDIDATE_POOL must be between 1 and 10"
+            )
+        return value
+
+    def _get_paper_retriever(self):
+        if self._paper_retriever is None:
+            self._paper_retriever = Specter2PaperRetriever()
+        return self._paper_retriever
+
+    def _rank_papers(
+        self,
+        query: str,
+        papers: list[PaperMetadata],
+        top_k: int,
+    ) -> list[PaperMetadata]:
+        ranked = self._get_paper_retriever().rank(query, papers, top_k=top_k)
+        return [hit.paper for hit in ranked]
 
     @staticmethod
     def _key(arxiv_id: str) -> str:
         return arxiv_id.strip().lower()
 
     async def search_papers(self, params: SearchPapersInput) -> SearchPapersResult:
+        candidate_count = params.max_results
+        if self._paper_retriever_mode == "specter2":
+            candidate_count = max(candidate_count, self._specter2_candidate_pool)
         papers = await anyio.to_thread.run_sync(
             partial(
                 search_arxiv,
                 query=params.query,
-                max_results=params.max_results,
+                max_results=candidate_count,
                 client=self._arxiv_client,
             )
         )
+
+        actual_candidate_count = len(papers)
+        if self._paper_retriever_mode == "specter2" and papers:
+            ranked = await anyio.to_thread.run_sync(
+                partial(
+                    self._rank_papers,
+                    params.query,
+                    papers,
+                    top_k=min(params.max_results, len(papers)),
+                )
+            )
+            papers = ranked
 
         for paper in papers:
             self._papers[self._key(paper.arxiv_id)] = paper
@@ -78,6 +137,9 @@ class LiteratureService:
         return SearchPapersResult(
             query=params.query,
             count=len(papers),
+            candidate_count=actual_candidate_count,
+            retrieval_mode=self._paper_retriever_mode,
+            reranking_applied=self._paper_retriever_mode == "specter2" and bool(papers),
             papers=[
                 PaperRecord.from_metadata(paper, summary_limit=1_000)
                 for paper in papers

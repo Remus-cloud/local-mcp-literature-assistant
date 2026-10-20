@@ -102,6 +102,9 @@ class SearchPapersResult(StrictModel):
     query: str
     count: int
     papers: list[PaperRecord]
+    retrieval_mode: str = "unknown"
+    candidate_count: int = 0
+    reranking_applied: bool = False
 
 
 class PaperDetailsResult(StrictModel):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "literature-bot"
-version = "0.2.0"
+version = "0.3.0a1"
 description = "A local literature search and evidence-grounded Q&A assistant with MCP support."
 requires-python = ">=3.11"
 dependencies = [
@@ -13,11 +13,22 @@ dependencies = [
     "openai>=3,<4",
     "PyMuPDF>=1.28,<2",
     "python-dotenv>=1,<2",
-    "streamlit>=1.55,<2",
+    "streamlit>=1.57,<2",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=9,<10"]
+scientific = [
+    "torch>=2.3",
+    "transformers>=4.40,<5",
+    "adapters>=1.2,<2",
+]
+verification = [
+    "torch>=2.6,<3",
+    "transformers>=4.40,<5",
+    "sentencepiece>=0.2,<0.3",
+    "hf-xet>=1.1,<2",
+]
 
 [project.scripts]
 literature-bot-mcp = "literature_bot.mcp_integration.server:main"
