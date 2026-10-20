@@ -97,7 +97,7 @@ python scripts/check_setup.py
 python -m streamlit run src/literature_bot/streamlit_app.py --server.address 127.0.0.1 --server.port 8501 --browser.gatherUsageStats false
 ```
 
-浏览器访问 **http://localhost:8501**。保持终端开启，停止时按 `Ctrl+C`。
+浏览器访问 [http://localhost:8501](http://localhost:8501)。保持终端开启，停止时按 `Ctrl+C`。
 以后重新进入项目目录并 `conda activate literature-bot`，执行同一启动命令即可。
 
 ### 页面中的三个选择
